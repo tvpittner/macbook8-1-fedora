@@ -1,0 +1,80 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# mb81-spi-sleep — systemd-sleep hook for the 12" MacBook (MacBook8,1)
+# Install to: /usr/lib/systemd/system-sleep/mb81-spi-sleep  (mode 0755)
+#
+# Problem: after S3 ("deep") suspend the internal keyboard and trackpad are dead;
+# the kernel log fills with "applespi ... SPI transfer timed out".
+#
+# Root cause (observed on MacBook8,1, Wildcat Point-LP LPSS in PCI mode):
+# on S3 resume the Apple firmware does not re-initialise the private LPSS
+# registers of the GSPI controller (8086:9ce6). After resume we read
+#     BAR0+0x800  PRV_CLOCK  = 0x00000000   -> SSP clock gated
+#     BAR0+0x804  PRV_RESETS = 0x00000000   -> controller held in reset
+# (on a working system the controller is out of reset and clocked). spi-pxa2xx-pci
+# never writes these registers, so the controller raises no interrupts and every
+# transfer times out. Re-binding the driver or a PCI remove/rescan does not help.
+#
+# Fix: before S3 unload applespi and unbind the SPI controller; after resume
+# deassert reset (0x804 = 0x3), enable the clock (0x800 |= 1), then bind again.
+# s2idle keeps the block powered, so the hook does nothing unless deep sleep is used.
+# If the keyboard still does not respond, it falls back to s2idle until reboot.
+
+PCI_ID="8086:9ce6"                      # Wildcat Point-LP Serial IO GSPI #1
+DRV=/sys/bus/pci/drivers/pxa2xx_spi_pci
+STATE=/run/mb81-spi-sleep.active
+log(){ logger -t mb81-spi-sleep "$*"; }
+
+grep -qx "MacBook8,1" /sys/class/dmi/id/product_name 2>/dev/null || exit 0
+
+DEV=""
+for d in /sys/bus/pci/devices/*; do
+    [ "$(cat $d/vendor):$(cat $d/device)" = "0x${PCI_ID%%:*}:0x${PCI_ID##*:}" ] && DEV=${d##*/} && break
+done
+[ -n "$DEV" ] || { log "GSPI controller $PCI_ID not found"; exit 0; }
+
+lpss_init() {
+python3 -I - "$DEV" <<'PY' 2>&1 | logger -t mb81-spi-sleep
+import mmap, os, struct, sys
+# resource0 can only be mmapped while no driver holds the BAR exclusively.
+f = os.open(f"/sys/bus/pci/devices/{sys.argv[1]}/resource0", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+r = lambda o: struct.unpack_from('<I', m, o)[0]
+def w(o, v): struct.pack_into('<I', m, o, v)
+before = (r(0x800), r(0x804))
+w(0x804, 0x0)                 # assert reset
+w(0x804, 0x3)                 # deassert functional + APB reset
+w(0x800, r(0x800) | 0x1)      # enable clock
+print(f"lpss init: clk 0x{before[0]:08x}->0x{r(0x800):08x} "
+      f"rst 0x{before[1]:08x}->0x{r(0x804):08x}")
+m.close(); os.close(f)
+PY
+}
+
+case "$1" in
+  pre)
+    grep -q '\[deep\]' /sys/power/mem_sleep || exit 0
+    case "$2" in suspend|hybrid-sleep|suspend-then-hibernate) ;; *) exit 0;; esac
+    touch "$STATE"
+    log "pre: unloading applespi, unbinding $DEV"
+    modprobe -r applespi
+    [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
+    ;;
+  post)
+    [ -e "$STATE" ] || exit 0
+    rm -f "$STATE"
+    setpci -s "${DEV#0000:}" COMMAND.w=0006     # memory decode + bus master
+    lpss_init
+    echo "$DEV" > "$DRV/bind"
+    modprobe applespi
+    sleep 2
+    if journalctl -k --since -2s | grep -q "applespi.*timed out"; then
+        log "post: applespi still failing -> using s2idle for the next sleep"
+        echo s2idle > /sys/power/mem_sleep
+    else
+        log "post: applespi OK"
+    fi
+    ;;
+esac
+exit 0

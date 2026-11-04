@@ -1,0 +1,27 @@
+--- a/resume_recover.sh	2026-11-04 21:17:38.968915810 +0100
++++ b/resume_recover.sh	2026-11-04 21:17:38.971338171 +0100
+@@ -39,6 +39,11 @@
+ # open — it pins the module and must be stopped before the codec can sit unowned.
+ run_user systemctl --user stop mb81-jack-switch.service 2>/dev/null
+ run_user systemctl --user stop $PWUNITS 2>/dev/null
++# alsa-state.service (root `alsactl rdaemon`) keeps /dev/snd/controlC* open
++# permanently and pins snd_hda_intel -> the unload below could never succeed.
++# Stop it here; the EXIT trap restarts it whatever happens.
++systemctl stop alsa-state.service 2>/dev/null
++trap 'systemctl start alsa-state.service 2>/dev/null' EXIT
+ sleep 1
+ 
+ echo "=== 2/5: unload the whole HDA stack so 00:1b.0 sits UNOWNED ==="
+@@ -49,10 +54,11 @@
+ rmmod snd_hda_codec_generic   2>/dev/null
+ rmmod snd_hda_codec_intelhdmi 2>/dev/null
+ rmmod snd_hda_codec_hdmi      2>/dev/null
+-modprobe -r snd_hda_intel     2>/dev/null
++modprobe -r snd_hda_intel
+ sleep 1
+ if [[ -e /sys/bus/pci/devices/0000:00:1b.0/driver ]]; then
+     echo "FAIL: 00:1b.0 still bound after unload:"; ls -l /sys/bus/pci/devices/0000:00:1b.0/driver
++    fuser -v /dev/snd/* 2>&1
+     echo "Something still holds the module. Reboot to recover."
+     run_user systemctl --user start $PWUNITS 2>/dev/null
+     run_user systemctl --user start mb81-jack-switch.service 2>/dev/null
