@@ -136,9 +136,12 @@ sudo modprobe applespi
 - Tested on **one** MacBook8,1 running Fedora 45, kernel 7.2.15, with the DMA
   workaround from [`../fedora-notes`](../fedora-notes/README.md) (SPI runs in
   PIO mode).
-- Verified: the live fix on a broken system, and a short `rtcwake` S3 cycle.
-  Longer real-world use (a full night with the lid closed) is
-  documented in the main README's status table.
+- Verified: the live fix on a broken system, several `rtcwake` S3 cycles, a
+  1-hour and a 9.5-hour (overnight) lid-closed suspend. Overnight drain was
+  about 0.5 %/h.
+- Once, closing the lid caused a wake-up after ~10 s. logind put the machine
+  back to sleep right away because the lid was still closed. The wake source
+  is unknown.
 - The LPSS UART (`00:15.5`) and I2C (`00:15.2`) controllers likely lose the same
   state. The UART driver (`8250_lpss`) reprograms its own clock. Nothing on this
   machine needs I2C1 in daily use, so they are left alone.

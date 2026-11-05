@@ -17,9 +17,12 @@ to existing projects, plus small Fedora-specific fixes.
 
 **Tested on:** one MacBook8,1, Fedora 45, kernel 7.2.15, GNOME.
 
-**S3 testing so far:** the live fix on a broken system, and a short `rtcwake`
-S3 cycle. A full night with the lid closed is still to be verified. This table
-will be updated.
+**S3 testing so far:** the live fix on a broken system, several `rtcwake` S3
+cycles, a 1-hour suspend, and a **9.5-hour overnight suspend** with the lid
+closed. Keyboard, trackpad and speakers came back automatically every time. Battery
+drain overnight was roughly **0.5 %/h** (63.8 % → 58.7 % in 9 h 27 min, per
+UPower). For comparison, skyostil measured about 1.9 %/h with s2idle in
+[#49](https://github.com/cb22/macbook12-spi-driver/issues/49).
 
 ## Quick start: S3 fix
 
