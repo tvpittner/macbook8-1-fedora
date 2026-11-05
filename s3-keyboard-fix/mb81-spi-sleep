@@ -19,11 +19,21 @@
 # Fix: before S3 unload applespi, unbind the SPI controller and save PRV_CLOCK;
 # after resume deassert reset (0x804 = 0x3), write PRV_CLOCK back, bind again.
 # s2idle keeps the block powered, so the hook does nothing unless deep sleep is used.
+#
+# Bluetooth: the LPSS UART (8086:9ce3, Broadcom BT via serdev) loses PRV_RESETS the
+# same way. Unbinding 8250_lpss is not an option (the kernel does not re-create the
+# serdev/Bluetooth device afterwards), so the reset is written while 8250_lpss stays
+# bound. That needs the kernel parameter iomem=relaxed; without it this part is
+# skipped. hci_uart_bcm is unbound before sleep and re-bound after the fix, which
+# re-initialises the Bluetooth chip.
 # If the keyboard still does not respond, it falls back to s2idle until reboot.
 
 PCI_ID="8086:9ce6"                      # Wildcat Point-LP Serial IO GSPI #1
 DRV=/sys/bus/pci/drivers/pxa2xx_spi_pci
 STATE=/run/mb81-spi-sleep.active
+UART_ID="8086:9ce3"                     # Wildcat Point-LP Serial IO UART #0 (Bluetooth)
+BT_DRV=/sys/bus/serial/drivers/hci_uart_bcm
+BT_STATE=/run/mb81-spi-sleep.bt
 log(){ logger -t mb81-spi-sleep "$*"; }
 
 grep -qx "MacBook8,1" /sys/class/dmi/id/product_name 2>/dev/null || exit 0
@@ -33,6 +43,10 @@ for d in /sys/bus/pci/devices/*; do
     [ "$(cat $d/vendor):$(cat $d/device)" = "0x${PCI_ID%%:*}:0x${PCI_ID##*:}" ] && DEV=${d##*/} && break
 done
 [ -n "$DEV" ] || { log "GSPI controller $PCI_ID not found"; exit 0; }
+UART=""
+for d in /sys/bus/pci/devices/*; do
+    [ "$(cat $d/vendor):$(cat $d/device)" = "0x${UART_ID%%:*}:0x${UART_ID##*:}" ] && UART=${d##*/} && break
+done
 
 CLKSAVE=/run/mb81-spi-sleep.clk
 
@@ -69,6 +83,19 @@ m.close(); os.close(f)
 PY
 }
 
+uart_reset() {
+python3 -I - "$UART" <<'PY' 2>&1 | logger -t mb81-spi-sleep
+import mmap, os, struct, sys
+f = os.open(f"/sys/bus/pci/devices/{sys.argv[1]}/resource0", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+r = lambda o: struct.unpack_from('<I', m, o)[0]
+before = r(0x804)
+struct.pack_into('<I', m, 0x804, 0x0); struct.pack_into('<I', m, 0x804, 0x3)
+print(f"uart reset: rst 0x{before:08x}->0x{r(0x804):08x} (clk 0x{r(0x800):08x})")
+m.close(); os.close(f)
+PY
+}
+
 case "$1" in
   pre)
     grep -q '\[deep\]' /sys/power/mem_sleep || exit 0
@@ -78,6 +105,14 @@ case "$1" in
     modprobe -r applespi
     [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
     lpss save
+    if [ -n "$UART" ] && grep -qw "iomem=relaxed" /proc/cmdline; then
+        for b in "$BT_DRV"/serial*; do
+            [ -e "$b" ] || continue
+            n=${b##*/}; echo "$n" > "$BT_STATE"
+            log "pre: unbinding Bluetooth $n from hci_uart_bcm"
+            echo "$n" > "$BT_DRV/unbind"
+        done
+    fi
     ;;
   post)
     [ -e "$STATE" ] || exit 0
@@ -86,6 +121,13 @@ case "$1" in
     lpss restore
     echo "$DEV" > "$DRV/bind"
     modprobe applespi
+    if [ -n "$UART" ] && grep -qw "iomem=relaxed" /proc/cmdline; then
+        uart_reset
+        if [ -s "$BT_STATE" ]; then
+            n=$(cat "$BT_STATE"); rm -f "$BT_STATE"
+            echo "$n" > "$BT_DRV/bind" && log "post: Bluetooth $n re-bound"
+        fi
+    fi
     sleep 2
     if journalctl -k --since -2s | grep -q "applespi.*timed out"; then
         log "post: applespi still failing -> using s2idle for the next sleep"

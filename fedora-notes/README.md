@@ -66,12 +66,17 @@ As recommended there:
 blacklist bdc_pci
 ```
 
-## Optional, cosmetic: silence the `serdev -EBUSY` boot message
+## Bluetooth: required DSDT override
 
-Every boot logs `serial serial0-0: failure adding ACPI serdev device. status -EBUSY`.
-It comes from the ACPI device `\_SB.PCI0.URT0.SSDC` (`apple-uart-ssdc`) on the LPSS
-UART. This machine uses a DSDT override that changes that device's `_STA` from
-`0x0F` to `Zero` (one line), loaded via dracut:
+Bluetooth is a Broadcom BCM4350C0 on the LPSS UART (`00:15.5`, ACPI
+`\_SB.PCI0.URT0.BLTH`, driver `hci_uart_bcm`). Out of the box, every boot logs
+`serial serial0-0: failure adding ACPI serdev device. status -EBUSY` and **there is
+no Bluetooth controller**. The UART has a second ACPI child,
+`\_SB.PCI0.URT0.SSDC` (`apple-uart-ssdc`), and serdev only supports one device per
+port. So the Bluetooth device never gets created.
+
+This machine uses a DSDT override that changes `SSDC`'s `_STA` from `0x0F` to
+`Zero` (one line). Then `hci0` appears. It is loaded via dracut:
 
 ```
 # /etc/dracut.conf.d/macbook81-acpi.conf
@@ -79,9 +84,26 @@ acpi_override="yes"
 acpi_table_dir="/etc/dracut-acpi"
 ```
 
-This only removes the message. No functional effect has been observed, so
-it isn't recommended unless the message bothers you. No modified firmware
-table is distributed here. To do it yourself: dump with `acpidump`,
+*(An earlier version of this page called the override "cosmetic". That was
+wrong: without it there is no Bluetooth. We verified this in the boot logs from before and after the override.)*
+
+No modified firmware table is distributed here. To do it yourself: dump with `acpidump`,
 disassemble with `iasl -d`, change that one `_STA`, bump the OEM revision,
-recompile, and put the `.aml` in `/etc/dracut-acpi/`. See the
+recompile, and put the `.aml` in `/etc/dracut-acpi/` (then `sudo dracut -f`). See the
 [kernel docs on initrd table override](https://docs.kernel.org/admin-guide/acpi/initrd_table_override.html).
+
+**Messages that look bad but are harmless** (Bluetooth works with them):
+
+- `BCM: failed to write update baudrate (-16)` / `Failed to set baudrate`: on Apple
+  machines `hci_bcm` takes the ACPI `_DSM` property `"baud"` (3,000,000) as the
+  initial speed and opens the UART at 3 Mbaud right away. The chip then rejects
+  the redundant "switch to 3 Mbaud" command ("Command Disallowed" = `-EBUSY`).
+  All later HCI commands succeed, so the link runs at 3 Mbaud.
+- `BCM: firmware Patch file not found, tried: 'brcm/BCM.hcd'`: no Apple patch RAM
+  file is available, so the chip runs its ROM firmware. Basic use works without
+  it.
+
+**After S3 suspend** Bluetooth stops working (`hci0: command 0x0c01 tx timeout`).
+The UART loses its LPSS reset state just like the keyboard's SPI controller. See
+[`../s3-keyboard-fix`](../s3-keyboard-fix/README.md), which also fixes this when
+booted with `iomem=relaxed`.

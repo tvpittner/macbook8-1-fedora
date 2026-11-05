@@ -79,6 +79,32 @@ The driver has to be unbound while the registers are written: while it is
 bound, the BAR is claimed exclusively and `resource0` cannot be mmapped
 (`EINVAL`).
 
+## Bluetooth after S3
+
+The LPSS UART (`8086:9ce3`, `00:15.5`) that carries Bluetooth has the same problem.
+After S3, `PRV_RESETS` (`0x804`) reads `0x00000000`, and `hci0` only logs
+`command 0x0c01 tx timeout`. Its clock register is reprogrammed by `8250_lpss`
+itself, so only the reset has to be released.
+
+The keyboard approach (unbind, write, rebind) does **not** work here: after
+unbinding `8250_lpss` the kernel does not re-create the serdev Bluetooth device
+(the ACPI child `BCM2E7C` is left without a physical node) until the next reboot.
+So the hook writes the UART's reset register while `8250_lpss` stays bound. The
+kernel only allows that with the boot parameter **`iomem=relaxed`**, which
+lets root map MMIO regions that drivers have claimed. Without it, the Bluetooth
+part of the hook is skipped and only the keyboard is fixed.
+
+Sequence: **pre:** unbind `hci_uart_bcm` from `serial0-0` (the serdev device
+stays). **post:** `0x804 = 0x0 → 0x3` on the UART, then bind `hci_uart_bcm` again,
+which re-initialises the chip.
+
+Security note: `iomem=relaxed` weakens a protection that only matters against root.
+On a machine without Secure Boot / kernel lockdown, root can load kernel modules
+anyway, so the practical difference is small. Decide for yourself.
+
+Tested: an `rtcwake` S3 cycle. Afterwards Bluetooth came back with no timeouts, and
+a scan found devices.
+
 ## Install
 
 ```bash
@@ -98,6 +124,8 @@ The log should look like this:
 mb81-spi-sleep: pre: unloading applespi, unbinding 0000:00:15.4
 mb81-spi-sleep: lpss save: clk 0x80190005 rst 0x00000003
 mb81-spi-sleep: lpss restore: clk 0x00000000->0x80190005 rst 0x00000000->0x00000003
+mb81-spi-sleep: uart reset: rst 0x00000000->0x00000003 (clk 0x00000000)   # only with iomem=relaxed
+mb81-spi-sleep: post: Bluetooth serial0-0 re-bound                         # only with iomem=relaxed
 mb81-spi-sleep: post: applespi OK
 ```
 
@@ -105,6 +133,7 @@ If that works, make S3 the default:
 
 ```bash
 sudo ./install.sh --make-deep-default   # sets mem_sleep_default=deep via grubby
+sudo ./install.sh --bluetooth           # adds iomem=relaxed (needed for Bluetooth after S3), reboot afterwards
 ```
 
 To undo everything: `sudo ./uninstall.sh` (goes back to `s2idle`).

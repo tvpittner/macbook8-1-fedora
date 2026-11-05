@@ -13,6 +13,7 @@ to existing projects, plus small Fedora-specific fixes.
 | **S3 suspend: keyboard after resume** | ✅ fixed by a sleep hook (new) | [s3-keyboard-fix](s3-keyboard-fix/README.md) |
 | Internal speakers | ✅ via [thomas-shirley/macbook8.1-speaker-driver](https://github.com/thomas-shirley/macbook8.1-speaker-driver) | [audio](audio/README.md) |
 | Speakers after resume (Fedora) | ✅ fixed by a small patch to the above (new) | [audio](audio/README.md) |
+| Bluetooth | ✅ needs a one-line DSDT override; S3 recovery via the same hook + `iomem=relaxed` (new) | [fedora-notes](fedora-notes/README.md), [s3-keyboard-fix](s3-keyboard-fix/README.md) |
 | FaceTime HD camera | ✅ via [patjak/facetimehd](https://github.com/patjak/facetimehd) | [fedora-notes](fedora-notes/README.md) |
 
 **Tested on:** one MacBook8,1, Fedora 45, kernel 7.2.15, GNOME.
