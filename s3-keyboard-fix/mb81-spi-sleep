@@ -48,50 +48,47 @@ for d in /sys/bus/pci/devices/*; do
     [ "$(cat $d/vendor):$(cat $d/device)" = "0x${UART_ID%%:*}:0x${UART_ID##*:}" ] && UART=${d##*/} && break
 done
 
-CLKSAVE=/run/mb81-spi-sleep.clk
-
-# lpss save|restore — runs while the driver is unbound (resource0 can only be
-# mmapped then). save: remember PRV_CLOCK as set by the firmware at boot (on this
-# machine 0x80190005: enable + M/N divider 2/25 + update bit). restore: deassert
-# reset and write the saved PRV_CLOCK back (fallback: just set the enable bit).
+# LPSS private registers BAR0+0x800..0x820 (9 dwords): CLOCK, RESETS, GENERAL,
+# SSP/-, SW_LTR, AUTO_LTR, CS_CTRL/0x818, -, TX_INT (0x820, bit 1 = TX_INT_MASK
+# on the UART). In ACPI mode Linux saves/restores exactly this block across
+# suspend (drivers/acpi/acpi_lpss.c, LPSS_SAVE_CTX); in PCI mode nothing does.
+# After S3 the firmware leaves it zeroed. A missing TX_INT_MASK on the UART lets
+# the LPSS raise TX interrupts nobody handles -> "irq 21: nobody cared" -> the
+# kernel disables the IRQ shared by Bluetooth and the keyboard.
+#
+# lpss save|restore <pci-dev> <file> — save before sleep, restore after resume.
 lpss() {
-python3 -I - "$DEV" "$1" "$CLKSAVE" <<'PY' 2>&1 | logger -t mb81-spi-sleep
+python3 -I - "$1" "$2" "$3" <<'PY' 2>&1 | logger -t mb81-spi-sleep
 import mmap, os, struct, sys
-dev, mode, save = sys.argv[1:4]
+mode, dev, save = sys.argv[1:4]
 f = os.open(f"/sys/bus/pci/devices/{dev}/resource0", os.O_RDWR | os.O_SYNC)
 m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
 r = lambda o: struct.unpack_from('<I', m, o)[0]
 def w(o, v): struct.pack_into('<I', m, o, v)
+OFFS = range(0x800, 0x824, 4)
+fmt = lambda: " ".join(f"{r(o):08x}" for o in OFFS)
 if mode == "save":
-    clk = r(0x800)
-    if clk & 1:
-        open(save, "w").write(f"{clk:#010x}\n")
-    print(f"lpss save: clk 0x{clk:08x} rst 0x{r(0x804):08x}")
+    vals = [r(o) for o in OFFS]
+    if vals[1] == 0x3:                    # only save a sane (out-of-reset) state
+        open(save, "w").write(" ".join(f"{v:#010x}" for v in vals) + "\n")
+    print(f"lpss save {dev}: {fmt()}")
 else:
-    before = (r(0x800), r(0x804))
     try:
-        clk = int(open(save).read(), 16)
+        vals = [int(x, 16) for x in open(save).read().split()]
     except (OSError, ValueError):
-        clk = 0
-    w(0x804, 0x0)                         # assert reset
-    w(0x804, 0x3)                         # deassert functional + APB reset
-    w(0x800, clk if clk & 1 else (r(0x800) | 0x1))
-    print(f"lpss restore: clk 0x{before[0]:08x}->0x{r(0x800):08x} "
-          f"rst 0x{before[1]:08x}->0x{r(0x804):08x}"
-          + ("" if clk & 1 else " (no saved clock, enable bit only)"))
-m.close(); os.close(f)
-PY
-}
-
-uart_reset() {
-python3 -I - "$UART" <<'PY' 2>&1 | logger -t mb81-spi-sleep
-import mmap, os, struct, sys
-f = os.open(f"/sys/bus/pci/devices/{sys.argv[1]}/resource0", os.O_RDWR | os.O_SYNC)
-m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
-r = lambda o: struct.unpack_from('<I', m, o)[0]
-before = r(0x804)
-struct.pack_into('<I', m, 0x804, 0x0); struct.pack_into('<I', m, 0x804, 0x3)
-print(f"uart reset: rst 0x{before:08x}->0x{r(0x804):08x} (clk 0x{r(0x800):08x})")
+        vals = None
+    before = fmt()
+    w(0x804, 0x0); w(0x804, 0x3)          # assert, then deassert func + APB reset
+    if vals and len(vals) == 9:
+        for o, v in zip(OFFS, vals):
+            if o not in (0x800, 0x804):
+                w(o, v)
+        w(0x800, vals[0])                 # clock last (incl. update bit)
+        note = ""
+    else:
+        w(0x800, r(0x800) | 0x1)
+        note = " (no saved state: reset + clock enable only)"
+    print(f"lpss restore {dev}: {before} -> {fmt()}{note}")
 m.close(); os.close(f)
 PY
 }
@@ -104,8 +101,9 @@ case "$1" in
     log "pre: unloading applespi, unbinding $DEV"
     modprobe -r applespi
     [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
-    lpss save
+    lpss save "$DEV" /run/mb81-spi-sleep.spi
     if [ -n "$UART" ] && grep -qw "iomem=relaxed" /proc/cmdline; then
+        lpss save "$UART" /run/mb81-spi-sleep.uart
         for b in "$BT_DRV"/serial*; do
             [ -e "$b" ] || continue
             n=${b##*/}; echo "$n" > "$BT_STATE"
@@ -118,11 +116,11 @@ case "$1" in
     [ -e "$STATE" ] || exit 0
     rm -f "$STATE"
     setpci -s "${DEV#0000:}" COMMAND.w=0006     # memory decode + bus master
-    lpss restore
+    lpss restore "$DEV" /run/mb81-spi-sleep.spi
     echo "$DEV" > "$DRV/bind"
     modprobe applespi
     if [ -n "$UART" ] && grep -qw "iomem=relaxed" /proc/cmdline; then
-        uart_reset
+        lpss restore "$UART" /run/mb81-spi-sleep.uart
         if [ -s "$BT_STATE" ]; then
             n=$(cat "$BT_STATE"); rm -f "$BT_STATE"
             echo "$n" > "$BT_DRV/bind" && log "post: Bluetooth $n re-bound"

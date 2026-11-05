@@ -68,9 +68,10 @@ know of one, please open an issue so we can credit it.
 MacBook8,1 and only when deep sleep is used.
 
 - **pre:** unload `applespi`, unbind the GSPI controller from `pxa2xx_spi_pci`,
-  save the current `PRV_CLOCK` (the firmware's boot value) to `/run`
-- **post:** re-enable PCI memory decode, deassert reset, write the saved
-  `PRV_CLOCK` back (if none was saved: only set the enable bit), bind
+  save its private register block `0x800`–`0x820` (incl. the firmware's
+  `PRV_CLOCK`) to `/run`
+- **post:** re-enable PCI memory decode, deassert reset, restore the saved block,
+  clock last (if nothing was saved: only set the clock enable bit), bind
   the driver again, load `applespi`, then check the log. If transfers still time
   out, it switches `/sys/power/mem_sleep` back to `s2idle` until the next
   reboot, so the next suspend can't make things worse.
@@ -81,29 +82,50 @@ bound, the BAR is claimed exclusively and `resource0` cannot be mmapped
 
 ## Bluetooth after S3
 
-The LPSS UART (`8086:9ce3`, `00:15.5`) that carries Bluetooth has the same problem.
-After S3, `PRV_RESETS` (`0x804`) reads `0x00000000`, and `hci0` only logs
-`command 0x0c01 tx timeout`. Its clock register is reprogrammed by `8250_lpss`
-itself, so only the reset has to be released.
+The LPSS UART (`8086:9ce3`, `00:15.5`) that carries Bluetooth has the same
+problem, and it is nastier. After S3 its whole private block (`0x800`–`0x820`) is
+zero:
 
-The keyboard approach (unbind, write, rebind) does **not** work here: after
-unbinding `8250_lpss` the kernel does not re-create the serdev Bluetooth device
-(the ACPI child `BCM2E7C` is left without a physical node) until the next reboot.
-So the hook writes the UART's reset register while `8250_lpss` stays bound. The
-kernel only allows that with the boot parameter **`iomem=relaxed`**, which
-lets root map MMIO regions that drivers have claimed. Without it, the Bluetooth
-part of the hook is skipped and only the keyboard is fixed.
+| Offset | Cold boot | After S3 |
+|--------|-----------|----------|
+| 0x800 CLOCK | `80190031` | `00000000` |
+| 0x804 RESETS | `00000003` | `00000000`: `hci0: command 0x0c01 tx timeout` |
+| 0x820 TX_INT | `00000002` (bit 1 = `TX_INT_MASK`) | `00000000` |
 
-Sequence: **pre:** unbind `hci_uart_bcm` from `serial0-0` (the serdev device
-stays). **post:** `0x804 = 0x0 → 0x3` on the UART, then bind `hci_uart_bcm` again,
+Releasing only the reset (an earlier version of this hook) brings Bluetooth back,
+but leaves `TX_INT_MASK` cleared. The LPSS then raises an extra TX interrupt that
+neither `serial8250_interrupt` nor `ssp_int` claims. IRQ 21 is shared by the UART
+and the keyboard's SPI controller, so under Bluetooth audio streaming the kernel
+logs `irq 21: nobody cared ... Disabling IRQ #21`, and **Bluetooth and the
+internal keyboard/trackpad die together**. The machine looks frozen.
+
+Linux's own ACPI-mode LPSS driver saves and restores exactly this register block
+across suspend (`drivers/acpi/acpi_lpss.c`, `LPSS_SAVE_CTX`, `LPSS_TX_INT_MASK`).
+In PCI mode nothing does. The hook now does the same for both the SPI and the
+UART controller: it **saves `0x800`–`0x820` before sleep and restores it after
+resume** (reset first, clock last).
+
+The keyboard approach (unbind, write, rebind) does **not** work for the UART:
+after unbinding `8250_lpss` the kernel does not re-create the serdev Bluetooth
+device (the ACPI child `BCM2E7C` is left without a physical node) until the next
+reboot. So the hook accesses the UART's registers while `8250_lpss` stays bound.
+The kernel only allows that with the boot parameter **`iomem=relaxed`**, which lets
+root map MMIO regions that drivers have claimed. Without it, the Bluetooth part of
+the hook is skipped and only the keyboard is fixed.
+
+Sequence: **pre:** save the UART block, unbind `hci_uart_bcm` from `serial0-0` (the
+serdev device stays). **post:** restore the UART block, bind `hci_uart_bcm` again,
 which re-initialises the chip.
 
 Security note: `iomem=relaxed` weakens a protection that only matters against root.
 On a machine without Secure Boot / kernel lockdown, root can load kernel modules
 anyway, so the practical difference is small. Decide for yourself.
 
-Tested: an `rtcwake` S3 cycle. Afterwards Bluetooth came back with no timeouts, and
-a scan found devices.
+Tested: an `rtcwake` S3 cycle, then 3 minutes of A2DP (AAC) streaming to AirPods
+Pro. About 60,000 IRQ-21 interrupts, all handled (`/proc/irq/21/spurious`:
+`unhandled 0`), with no Bluetooth timeouts. With the reset-only version, the same
+scenario disabled IRQ 21. Note that `irqbalance` may move IRQ 21 between CPUs, so
+sum all columns of `/proc/interrupts` when you check it.
 
 ## Install
 
@@ -122,10 +144,11 @@ The log should look like this:
 
 ```
 mb81-spi-sleep: pre: unloading applespi, unbinding 0000:00:15.4
-mb81-spi-sleep: lpss save: clk 0x80190005 rst 0x00000003
-mb81-spi-sleep: lpss restore: clk 0x00000000->0x80190005 rst 0x00000000->0x00000003
-mb81-spi-sleep: uart reset: rst 0x00000000->0x00000003 (clk 0x00000000)   # only with iomem=relaxed
-mb81-spi-sleep: post: Bluetooth serial0-0 re-bound                         # only with iomem=relaxed
+mb81-spi-sleep: lpss save 0000:00:15.4: 80190005 00000003 00000000 00000000 00000800 00000800 00000003 00000000 00000000
+mb81-spi-sleep: lpss save 0000:00:15.5: 80190031 00000003 ...                 # UART, only with iomem=relaxed
+mb81-spi-sleep: lpss restore 0000:00:15.4: 00000000 00000000 ... -> 80190005 00000003 ...
+mb81-spi-sleep: lpss restore 0000:00:15.5: 00000000 00000000 ... -> 80190031 00000003 ... 00000002
+mb81-spi-sleep: post: Bluetooth serial0-0 re-bound
 mb81-spi-sleep: post: applespi OK
 ```
 
