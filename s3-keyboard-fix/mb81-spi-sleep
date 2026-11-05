@@ -16,8 +16,8 @@
 # never writes these registers, so the controller raises no interrupts and every
 # transfer times out. Re-binding the driver or a PCI remove/rescan does not help.
 #
-# Fix: before S3 unload applespi and unbind the SPI controller; after resume
-# deassert reset (0x804 = 0x3), enable the clock (0x800 |= 1), then bind again.
+# Fix: before S3 unload applespi, unbind the SPI controller and save PRV_CLOCK;
+# after resume deassert reset (0x804 = 0x3), write PRV_CLOCK back, bind again.
 # s2idle keeps the block powered, so the hook does nothing unless deep sleep is used.
 # If the keyboard still does not respond, it falls back to s2idle until reboot.
 
@@ -34,20 +34,37 @@ for d in /sys/bus/pci/devices/*; do
 done
 [ -n "$DEV" ] || { log "GSPI controller $PCI_ID not found"; exit 0; }
 
-lpss_init() {
-python3 -I - "$DEV" <<'PY' 2>&1 | logger -t mb81-spi-sleep
+CLKSAVE=/run/mb81-spi-sleep.clk
+
+# lpss save|restore — runs while the driver is unbound (resource0 can only be
+# mmapped then). save: remember PRV_CLOCK as set by the firmware at boot (on this
+# machine 0x80190005: enable + M/N divider 2/25 + update bit). restore: deassert
+# reset and write the saved PRV_CLOCK back (fallback: just set the enable bit).
+lpss() {
+python3 -I - "$DEV" "$1" "$CLKSAVE" <<'PY' 2>&1 | logger -t mb81-spi-sleep
 import mmap, os, struct, sys
-# resource0 can only be mmapped while no driver holds the BAR exclusively.
-f = os.open(f"/sys/bus/pci/devices/{sys.argv[1]}/resource0", os.O_RDWR | os.O_SYNC)
+dev, mode, save = sys.argv[1:4]
+f = os.open(f"/sys/bus/pci/devices/{dev}/resource0", os.O_RDWR | os.O_SYNC)
 m = mmap.mmap(f, 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
 r = lambda o: struct.unpack_from('<I', m, o)[0]
 def w(o, v): struct.pack_into('<I', m, o, v)
-before = (r(0x800), r(0x804))
-w(0x804, 0x0)                 # assert reset
-w(0x804, 0x3)                 # deassert functional + APB reset
-w(0x800, r(0x800) | 0x1)      # enable clock
-print(f"lpss init: clk 0x{before[0]:08x}->0x{r(0x800):08x} "
-      f"rst 0x{before[1]:08x}->0x{r(0x804):08x}")
+if mode == "save":
+    clk = r(0x800)
+    if clk & 1:
+        open(save, "w").write(f"{clk:#010x}\n")
+    print(f"lpss save: clk 0x{clk:08x} rst 0x{r(0x804):08x}")
+else:
+    before = (r(0x800), r(0x804))
+    try:
+        clk = int(open(save).read(), 16)
+    except (OSError, ValueError):
+        clk = 0
+    w(0x804, 0x0)                         # assert reset
+    w(0x804, 0x3)                         # deassert functional + APB reset
+    w(0x800, clk if clk & 1 else (r(0x800) | 0x1))
+    print(f"lpss restore: clk 0x{before[0]:08x}->0x{r(0x800):08x} "
+          f"rst 0x{before[1]:08x}->0x{r(0x804):08x}"
+          + ("" if clk & 1 else " (no saved clock, enable bit only)"))
 m.close(); os.close(f)
 PY
 }
@@ -60,12 +77,13 @@ case "$1" in
     log "pre: unloading applespi, unbinding $DEV"
     modprobe -r applespi
     [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
+    lpss save
     ;;
   post)
     [ -e "$STATE" ] || exit 0
     rm -f "$STATE"
     setpci -s "${DEV#0000:}" COMMAND.w=0006     # memory decode + bus master
-    lpss_init
+    lpss restore
     echo "$DEV" > "$DRV/bind"
     modprobe applespi
     sleep 2

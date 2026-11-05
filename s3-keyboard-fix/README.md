@@ -24,16 +24,15 @@ The keyboard/trackpad sits on the Intel LPSS GSPI controller
 driver `spi-pxa2xx-pci`). Besides the normal SSP registers, this controller has a
 block of **private LPSS registers** at `BAR0 + 0x800`:
 
-| Offset | Register   | After S3 resume (measured) | After the fix (measured, keyboard works) |
-|--------|------------|----------------------------|------------------------------------------|
-| 0x800  | PRV_CLOCK  | `0x00000000`: clock gated | `0x00000001` |
-| 0x804  | PRV_RESETS | `0x00000000`: held in reset | `0x00000003` |
+| Offset | Register   | After cold boot (measured) | After S3 resume (measured) |
+|--------|------------|----------------------------|----------------------------|
+| 0x800  | PRV_CLOCK  | `0x80190005` | `0x00000000`: clock gated |
+| 0x804  | PRV_RESETS | `0x00000003` | `0x00000000`: held in reset |
 
-The values right after a cold boot have not been dumped yet (that requires
-briefly unbinding the driver on a freshly booted machine). They will be added
-here. Since the keyboard works after a cold boot, the firmware evidently brings
-the controller out of reset and enables its clock there. On S3 resume it does
-not. Presumably macOS's own driver handles this,
+The cold-boot `PRV_CLOCK` value decodes to: bit 0 = clock enable, bits 1–15
+M = 2, bits 16–30 N = 25 (an M/N divider of the LPSS input clock), bit 31 = update
+(latch M/N). So on a cold boot the firmware takes the controller out of reset
+and programs the clock, including its divider. On S3 resume it does not. Presumably macOS's own driver handles this,
 and Linux doesn't. In PCI mode `spi-pxa2xx-pci` never touches these registers,
 so after S3 the controller has no clock and stays in reset. It raises no
 interrupts at all (the IRQ counter in `/proc/interrupts` stays frozen), and
@@ -47,9 +46,9 @@ Things that were checked and are **not** the cause:
   `ISOL` method in the DSDT) are still in native mode after resume.
 - **PCI power state.** The device is in D0 and memory decode is enabled.
 
-The fix uses the same sequence that coreboot uses for these controllers on
-Lynx Point / Broadwell in PCI mode: deassert reset (`0x804 = 0x3`) and set the
-clock enable bit (`0x800 |= 1`). See
+The fix puts back exactly what the firmware programmed at boot: deassert reset
+(`0x804 = 0x3`) and restore the saved `PRV_CLOCK` value. coreboot initialises
+these controllers the same way on Lynx Point / Broadwell in PCI mode. See
 [coreboot: "lynxpoint: Enable SerialIO clock in PCI mode"](https://www.coreboot.org/pipermail/coreboot-gerrit/2013-November/004224.html)
 and the register definitions in coreboot's
 [Broadwell `serialio.h`](https://doxygen.coreboot.org/da/d74/broadwell_2include_2soc_2serialio_8h_source.html).
@@ -68,8 +67,10 @@ know of one, please open an issue so we can credit it.
 [`mb81-spi-sleep`](mb81-spi-sleep) is a `systemd-sleep` hook. It only acts on
 MacBook8,1 and only when deep sleep is used.
 
-- **pre:** unload `applespi`, unbind the GSPI controller from `pxa2xx_spi_pci`
-- **post:** re-enable PCI memory decode, write the two private registers, bind
+- **pre:** unload `applespi`, unbind the GSPI controller from `pxa2xx_spi_pci`,
+  save the current `PRV_CLOCK` (the firmware's boot value) to `/run`
+- **post:** re-enable PCI memory decode, deassert reset, write the saved
+  `PRV_CLOCK` back (if none was saved: only set the enable bit), bind
   the driver again, load `applespi`, then check the log. If transfers still time
   out, it switches `/sys/power/mem_sleep` back to `s2idle` until the next
   reboot, so the next suspend can't make things worse.
@@ -95,7 +96,8 @@ The log should look like this:
 
 ```
 mb81-spi-sleep: pre: unloading applespi, unbinding 0000:00:15.4
-mb81-spi-sleep: lpss init: clk 0x00000000->0x00000001 rst 0x00000000->0x00000003
+mb81-spi-sleep: lpss save: clk 0x80190005 rst 0x00000003
+mb81-spi-sleep: lpss restore: clk 0x00000000->0x80190005 rst 0x00000000->0x00000003
 mb81-spi-sleep: post: applespi OK
 ```
 
@@ -114,7 +116,8 @@ Other distributions: copy the hook to `/usr/lib/systemd/system-sleep/` and set
 ## Recovering by hand
 
 If you are stuck with a dead keyboard after S3 without the hook (e.g. using an
-external keyboard or SSH), the same steps fix it live, without a reboot:
+external keyboard or SSH), the same steps fix it live, without a reboot. This
+writes the cold-boot clock value measured on this MacBook8,1:
 
 ```bash
 sudo modprobe -r applespi
@@ -125,7 +128,7 @@ import mmap, os, struct
 f = os.open("/sys/bus/pci/devices/0000:00:15.4/resource0", os.O_RDWR | os.O_SYNC)
 m = mmap.mmap(f, 4096)
 struct.pack_into('<I', m, 0x804, 0); struct.pack_into('<I', m, 0x804, 3)
-struct.pack_into('<I', m, 0x800, struct.unpack_from('<I', m, 0x800)[0] | 1)
+struct.pack_into('<I', m, 0x800, 0x80190005)
 PY
 echo 0000:00:15.4 | sudo tee /sys/bus/pci/drivers/pxa2xx_spi_pci/bind
 sudo modprobe applespi
@@ -138,7 +141,9 @@ sudo modprobe applespi
   PIO mode).
 - Verified: the live fix on a broken system, several `rtcwake` S3 cycles, a
   1-hour and a 9.5-hour (overnight) lid-closed suspend. Overnight drain was
-  about 0.5 %/h.
+  about 0.5 %/h. Those runs used an earlier version that only set the clock
+  enable bit (`0x800 = 0x1`, no divider), which also worked. The current
+  version restores the exact boot value and has passed an `rtcwake` S3 cycle.
 - Once, closing the lid caused a wake-up after ~10 s. logind put the machine
   back to sleep right away because the lid was still closed. The wake source
   is unknown.
