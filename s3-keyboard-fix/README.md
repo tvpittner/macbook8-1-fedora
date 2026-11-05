@@ -113,9 +113,13 @@ The kernel only allows that with the boot parameter **`iomem=relaxed`**, which l
 root map MMIO regions that drivers have claimed. Without it, the Bluetooth part of
 the hook is skipped and only the keyboard is fixed.
 
-Sequence: **pre:** save the UART block, unbind `hci_uart_bcm` from `serial0-0` (the
-serdev device stays). **post:** restore the UART block, bind `hci_uart_bcm` again,
-which re-initialises the chip.
+Sequence: **pre:** save the UART block, remember the connected Bluetooth devices,
+unbind `hci_uart_bcm` from `serial0-0` (the serdev device stays). **post:** restore
+the UART block, bind `hci_uart_bcm` again (this re-initialises the chip), then a
+transient systemd unit waits for the speaker recovery
+(`mb81-resume-recover.service`, if installed) and reconnects the remembered
+devices. A2DP needs PipeWire to be running, so reconnecting earlier would leave
+the headphones without audio.
 
 Security note: `iomem=relaxed` weakens a protection that only matters against root.
 On a machine without Secure Boot / kernel lockdown, root can load kernel modules

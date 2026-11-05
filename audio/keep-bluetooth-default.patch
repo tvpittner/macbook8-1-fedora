@@ -1,0 +1,40 @@
+--- a/resume_recover.sh
++++ b/resume_recover.sh
+@@ -104,6 +104,14 @@
+ echo "=== 5/5: restart PipeWire + the jack-switch monitor; select the speaker sink ==="
+ run_user systemctl --user start $PWUNITS 2>/dev/null
+ sleep 3
+-run_user pactl set-default-sink input.MacBook_Speaker 2>/dev/null || true
++# Only force the internal speaker if the user's preferred sink isn't a Bluetooth
++# device: right after resume the BT device is not reconnected yet, and forcing the
++# speaker here would overwrite WirePlumber's remembered preference.
++PREF=$(sed -n 's/^default.configured.audio.sink=//p' \
++       "$(getent passwd "$U" | cut -d: -f6)/.local/state/wireplumber/default-nodes" 2>/dev/null)
++case "$PREF" in
++    bluez_*) echo "    preferred sink is Bluetooth ($PREF) - not forcing the speaker" ;;
++    *)       run_user pactl set-default-sink input.MacBook_Speaker 2>/dev/null || true ;;
++esac
+ run_user systemctl --user start mb81-jack-switch.service 2>/dev/null || true
+ echo "=== done — audio should be back. If silent, just reboot (cold-boot path is clean). ==="
+--- a/mb81-jack-switch.sh
++++ b/mb81-jack-switch.sh
+@@ -104,8 +104,17 @@
+     node_exists "$startup_sink" && break
+     sleep 0.25
+ done
+-log "startup: $([ "$last" = on ] && echo headphones || echo speakers) -> $startup_sink"
+-set_default "$startup_sink"
++# Don't override a Bluetooth preference (e.g. AirPods) with the speaker: after
++# resume the BT device reconnects a few seconds later and WirePlumber switches to
++# it by itself, as long as the configured default still names it.
++pref="$(pw-metadata -n default 0 default.configured.audio.sink 2>/dev/null \
++        | grep -o '"name": *"[^"]*"' | sed 's/.*"name": *"\([^"]*\)"/\1/' | tail -1)"
++if [[ "$last" != on && "$pref" == bluez_* ]]; then
++    log "startup: Bluetooth preferred ($pref) - keeping it"
++else
++    log "startup: $([ "$last" = on ] && echo headphones || echo speakers) -> $startup_sink"
++    set_default "$startup_sink"
++fi
+ 
+ # React to control changes. alsactl emits a line on every control event on the
+ # card; re-read the jack and act only when its state actually changed. (The pipe

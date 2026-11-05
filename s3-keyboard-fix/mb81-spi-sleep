@@ -34,6 +34,7 @@ STATE=/run/mb81-spi-sleep.active
 UART_ID="8086:9ce3"                     # Wildcat Point-LP Serial IO UART #0 (Bluetooth)
 BT_DRV=/sys/bus/serial/drivers/hci_uart_bcm
 BT_STATE=/run/mb81-spi-sleep.bt
+BT_DEVS=/run/mb81-spi-sleep.btdevs
 log(){ logger -t mb81-spi-sleep "$*"; }
 
 grep -qx "MacBook8,1" /sys/class/dmi/id/product_name 2>/dev/null || exit 0
@@ -104,6 +105,7 @@ case "$1" in
     lpss save "$DEV" /run/mb81-spi-sleep.spi
     if [ -n "$UART" ] && grep -qw "iomem=relaxed" /proc/cmdline; then
         lpss save "$UART" /run/mb81-spi-sleep.uart
+        bluetoothctl devices Connected 2>/dev/null | awk '{print $2}' > "$BT_DEVS"
         for b in "$BT_DRV"/serial*; do
             [ -e "$b" ] || continue
             n=${b##*/}; echo "$n" > "$BT_STATE"
@@ -124,6 +126,33 @@ case "$1" in
         if [ -s "$BT_STATE" ]; then
             n=$(cat "$BT_STATE"); rm -f "$BT_STATE"
             echo "$n" > "$BT_DRV/bind" && log "post: Bluetooth $n re-bound"
+        fi
+        # Reconnect devices that were connected before sleep, once audio recovery
+        # is done and PipeWire is back (A2DP needs PipeWire's endpoints). Runs as a
+        # transient unit: children of sleep hooks are killed when the hook exits.
+        if [ -s "$BT_DEVS" ]; then
+            systemd-run --no-block --quiet --unit="mb81-bt-reconnect-$(date +%s)" \
+              /bin/bash -c '
+                T0="'"$(date "+%Y-%m-%d %H:%M:%S")"'"
+                # wait (max 90 s) for the speaker recovery to finish, if it is installed
+                if systemctl cat mb81-resume-recover.service >/dev/null 2>&1; then
+                    for i in $(seq 90); do
+                        journalctl -u mb81-resume-recover.service --since "$T0" --no-pager 2>/dev/null \
+                          | grep -qE "=== done|FAIL" && break
+                        sleep 1
+                    done
+                fi
+                sleep 3
+                for i in $(seq 20); do bluetoothctl show 2>/dev/null | grep -q "Powered: yes" && break; sleep 1; done
+                while read -r a; do
+                    [ -n "$a" ] || continue
+                    for t in 1 2 3; do
+                        bluetoothctl --timeout 15 connect "$a" >/dev/null 2>&1 && \
+                          { logger -t mb81-spi-sleep "post: reconnected Bluetooth $a"; break; }
+                        sleep 5
+                    done
+                done < '"$BT_DEVS"'
+                rm -f '"$BT_DEVS"
         fi
     fi
     sleep 2

@@ -55,3 +55,33 @@ and the speakers played afterwards.
 
 This patch is offered upstream as well. Once it is merged there, this
 section will only point to the upstream project.
+
+## Bluetooth headphones stay the default output after resume
+
+Two places in the upstream scripts hard-wire the internal speaker as the default
+sink. With Bluetooth headphones (e.g. AirPods) that means after every resume the
+sound comes out of the speaker:
+
+- `resume_recover.sh` step 5 runs `pactl set-default-sink input.MacBook_Speaker`.
+- `mb81-jack-switch.sh` sets the speaker as default at every (re)start when no
+  wired headphones are plugged in, and the resume script restarts it.
+
+Both overwrite WirePlumber's remembered preference
+(`~/.local/state/wireplumber/default-nodes`). If that still names the Bluetooth
+device, WirePlumber switches back to it by itself as soon as it reconnects.
+
+[`keep-bluetooth-default.patch`](keep-bluetooth-default.patch) leaves the default
+alone when the preferred sink is a `bluez_*` device and no wired headphones are
+plugged in. Wired-headphone switching is unchanged. Apply it after
+`fedora-alsa-state.patch`:
+
+```bash
+cd macbook8.1-speaker-driver
+patch -p1 < /path/to/macbook8-1-fedora/audio/fedora-alsa-state.patch
+patch -p1 < /path/to/macbook8-1-fedora/audio/keep-bluetooth-default.patch
+```
+
+Combined with the Bluetooth part of [`../s3-keyboard-fix`](../s3-keyboard-fix/README.md)
+(which reconnects previously connected Bluetooth devices after resume), AirPods
+come back as the active output about 30 s after opening the lid. Tested with an
+S3 cycle.
