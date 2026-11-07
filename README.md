@@ -18,12 +18,21 @@ to existing projects, plus small Fedora-specific fixes.
 
 **Tested on:** one MacBook8,1, Fedora 45, kernel 7.2.15, GNOME.
 
-**S3 testing so far:** the live fix on a broken system, several `rtcwake` S3
-cycles, a 1-hour suspend, and a **9.5-hour overnight suspend** with the lid
-closed. Keyboard, trackpad and speakers came back automatically every time. Battery
-drain overnight was roughly **0.5 %/h** (63.8 % → 58.7 % in 9 h 27 min, per
-UPower). For comparison, skyostil measured about 1.9 %/h with s2idle in
-[#49](https://github.com/cb22/macbook12-spi-driver/issues/49).
+**S3 testing so far:** the live fix on a broken system, many `rtcwake` S3 cycles,
+and real lid-closed suspends of up to **31 hours** (2026-11-04 to 11-07). Keyboard,
+trackpad, speakers and Bluetooth came back automatically every time.
+
+**Battery drain in S3** (UPower, battery at 84 % of design capacity):
+
+| Suspend | Measured | Drain |
+|---|---|---|
+| s2idle, for comparison (skyostil in [#49](https://github.com/cb22/macbook12-spi-driver/issues/49)) | n/a | about 1.9 %/h |
+| S3, first overnight test | 63.8 % → 58.7 % in 9 h 27 min | about 0.5 %/h |
+| S3, two suspends of 6 h 52 min + 31 h 16 min (awake ~1 min in between) | 70.7 % → 59.8 % in about 38 h | **about 0.3 %/h** |
+
+That is roughly 2 weeks of standby from a full battery, compared with about 2 days with s2idle.
+The 38-hour figure is approximate: UPower recorded no data points during that
+period, so it uses the last value before and the current value after.
 
 ## Quick start: S3 fix
 

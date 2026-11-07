@@ -195,11 +195,13 @@ sudo modprobe applespi
 - Tested on **one** MacBook8,1 running Fedora 45, kernel 7.2.15, with the DMA
   workaround from [`../fedora-notes`](../fedora-notes/README.md) (SPI runs in
   PIO mode).
-- Verified: the live fix on a broken system, several `rtcwake` S3 cycles, a
-  1-hour and a 9.5-hour (overnight) lid-closed suspend. Overnight drain was
-  about 0.5 %/h. Those runs used an earlier version that only set the clock
-  enable bit (`0x800 = 0x1`, no divider), which also worked. The current
-  version restores the exact boot value and has passed an `rtcwake` S3 cycle.
+- Verified: the live fix on a broken system, many `rtcwake` S3 cycles, and
+  lid-closed suspends of 1 h, 9.5 h, 12 h, 6.9 h and 31 h. Drain was about
+  0.5 %/h overnight and about 0.3 %/h over 38 h (see the main README). The
+  first overnight run used an earlier version that only set the clock enable bit
+  (`0x800 = 0x1`, no divider), which also worked. The long suspends from
+  2026-11-05 on used the current version (full register block restore incl.
+  Bluetooth), with no keyboard or Bluetooth failure in 4 resumes.
 - Once, closing the lid caused a wake-up after ~10 s. logind put the machine
   back to sleep right away because the lid was still closed. The wake source
   is unknown.
