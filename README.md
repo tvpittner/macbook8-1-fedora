@@ -20,7 +20,8 @@ to existing projects, plus small Fedora-specific fixes.
 
 **S3 testing so far:** the live fix on a broken system, many `rtcwake` S3 cycles,
 and real lid-closed suspends of up to **31 hours** (2026-11-04 to 11-07). Keyboard,
-trackpad, speakers and Bluetooth came back automatically every time.
+trackpad and speakers came back automatically every time. With the current version
+(including the Bluetooth part), Bluetooth did too: 4 of 4 resumes, no timeouts.
 
 **Battery drain in S3** (UPower, battery at 84 % of design capacity):
 
